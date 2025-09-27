@@ -478,7 +478,13 @@ curl -X POST http://localhost:3000/api/parser/status \
 | id | 是 | string | 任务ID | `docmind-20241201-b15f****` |
 | layoutStepSize | 否 | number | 分页大小 | `100` |
 | layoutNum | 否 | number | 分页页码（从0开始） | `0` |
+| getAllPages | 否 | boolean | 是否获取所有页面内容（自动获取完整PDF内容） | `true` |
 | format | 否 | string | 返回格式：`json`（完整结构）、`simplified`（简化结构）、`markdown`（Markdown文本） | `markdown` |
+
+**重要说明：**
+- 当 `getAllPages=true` 时，系统会自动获取PDF的所有页面内容，确保不会遗漏任何信息
+- 当 `getAllPages=false` 或不设置时，只获取指定页面的内容（通过 `layoutNum` 参数指定）
+- 建议对于重要文档使用 `getAllPages=true` 以确保完整性
 
 #### 响应出参
 
@@ -521,13 +527,14 @@ curl -X POST http://localhost:3000/api/parser/status \
 
 #### 请求示例
 
-##### 获取Markdown格式（推荐用于AI处理）
+##### 获取完整PDF的Markdown格式（推荐用于AI处理）
 ```bash
 curl -X POST http://localhost:3000/api/parser/result \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{ 
     "id": "docmind-20241201-b15f****", 
+    "getAllPages": true,
     "format": "markdown"
   }'
 ```

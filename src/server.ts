@@ -515,7 +515,7 @@ app.post('/api/parser/status', tokenAuthMiddleware, async (req, res) => {
 // 获取解析结果
 app.post('/api/parser/result', tokenAuthMiddleware, async (req, res) => {
   try {
-    const { id, layoutStepSize, layoutNum, format = 'json' } = req.body;
+    const { id, layoutStepSize, layoutNum, format = 'json', getAllPages = false } = req.body;
     if (!id) {
       res.status(400).json({ error: 'MISSING_PARAMS', message: 'id 必填' });
       return;
@@ -527,7 +527,36 @@ app.post('/api/parser/result', tokenAuthMiddleware, async (req, res) => {
       endpoint: req.user!.endpoint,
     };
     if (req.user!.securityToken) credentials.securityToken = req.user!.securityToken;
-    const data = await getParserResult(credentials, id, { layoutStepSize, layoutNum });
+    
+    let data;
+    if (getAllPages) {
+      // 如果要求获取所有页面，先查询状态获取页数
+      const statusData = await queryParserStatus(credentials, id);
+      const estimatedPages = statusData.data?.pageCountEstimate || 1;
+      
+      // 获取所有页面的数据
+      const allLayouts: any[] = [];
+      const pageSize = layoutStepSize || 100; // 每页获取100个元素
+      
+      for (let pageNum = 0; pageNum < Math.ceil(estimatedPages); pageNum++) {
+        const pageData = await getParserResult(credentials, id, { layoutStepSize: pageSize, layoutNum: pageNum });
+        if (pageData.data?.layouts) {
+          allLayouts.push(...pageData.data.layouts);
+        }
+      }
+      
+      // 合并所有页面的数据
+      data = {
+        ...statusData,
+        data: {
+          ...statusData.data,
+          layouts: allLayouts
+        }
+      };
+    } else {
+      // 正常获取指定页面的数据
+      data = await getParserResult(credentials, id, { layoutStepSize, layoutNum });
+    }
     
     // 根据format参数返回不同格式的结果
     if (format === 'markdown') {
