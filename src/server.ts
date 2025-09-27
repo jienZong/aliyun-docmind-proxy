@@ -20,7 +20,7 @@ function logError(context: string, err: any) {
   }
 }
 
-// 提取Markdown内容 - 完整保留所有医疗信息
+// 提取Markdown内容 - 直接组合markdownContent
 function extractMarkdownFromParserResult(data: any): string {
   if (!data?.data?.layouts) return '';
   
@@ -28,46 +28,18 @@ function extractMarkdownFromParserResult(data: any): string {
   const layouts = data.data.layouts;
   
   for (const layout of layouts) {
-    // 优先使用markdownContent，如果没有则使用text
+    // 直接使用markdownContent，如果没有则使用text
     if (layout.markdownContent) {
       markdown += layout.markdownContent + '\n\n';
     } else if (layout.text) {
-      // 根据类型添加适当的格式
-      if (layout.type === 'title') {
-        markdown += `# ${layout.text.trim()}\n\n`;
-      } else if (layout.type === 'table') {
-        // 表格内容保持原样
-        markdown += layout.text + '\n\n';
-      } else {
-        markdown += layout.text + '\n\n';
-      }
-    }
-    
-    // 对于表格类型，额外提取结构化数据
-    if (layout.type === 'table' && layout.llmResult && layout.llmResult !== layout.markdownContent) {
-      markdown += '## 结构化表格数据\n' + layout.llmResult + '\n\n';
-    }
-    
-    // 对于表格，也提取cells中的详细信息
-    if (layout.type === 'table' && layout.cells && layout.cells.length > 0) {
-      markdown += '## 表格详细数据\n';
-      for (const cell of layout.cells) {
-        if (cell.layouts && cell.layouts.length > 0) {
-          for (const cellLayout of cell.layouts) {
-            if (cellLayout.text && cellLayout.text.trim()) {
-              markdown += `- ${cellLayout.text.trim()}\n`;
-            }
-          }
-        }
-      }
-      markdown += '\n';
+      markdown += layout.text + '\n\n';
     }
   }
   
   return markdown.trim();
 }
 
-// 简化解析结果 - 完整保留所有医疗信息
+// 简化解析结果 - 保留核心信息
 function simplifyParserResult(data: any): any {
   if (!data?.data?.layouts) return { layouts: [] };
   
@@ -75,13 +47,12 @@ function simplifyParserResult(data: any): any {
     const simplified: any = {
       type: layout.type,
       subType: layout.subType,
-      level: layout.level,
       text: layout.text,
       markdownContent: layout.markdownContent,
       pageNum: layout.pageNum
     };
     
-    // 保留所有表格信息
+    // 如果是表格，保留关键信息
     if (layout.type === 'table') {
       simplified.tableInfo = {
         rows: layout.numRow,
@@ -89,23 +60,9 @@ function simplifyParserResult(data: any): any {
         markdownContent: layout.markdownContent,
         llmResult: layout.llmResult
       };
-      
-      // 保留完整的表格数据
-      if (layout.cells && layout.cells.length > 0) {
-        simplified.tableData = layout.cells.map((cell: any) => {
-          if (cell.layouts && cell.layouts.length > 0) {
-            return cell.layouts.map((cellLayout: any) => ({
-              text: cellLayout.text,
-              type: cellLayout.type,
-              alignment: cellLayout.alignment
-            })).filter((item: any) => item.text);
-          }
-          return [];
-        }).flat();
-      }
     }
     
-    // 保留图片信息
+    // 如果是图片，保留图片信息
     if (layout.type === 'figure') {
       simplified.imageInfo = {
         markdownContent: layout.markdownContent,
@@ -113,71 +70,17 @@ function simplifyParserResult(data: any): any {
       };
     }
     
-    // 保留所有文本内容，不进行过滤
-    if (layout.type === 'text' && layout.text) {
-      simplified.medicalContent = true; // 标记为医疗内容
-      simplified.originalText = layout.text;
-    }
-    
-    // 保留所有blocks信息（用于详细文本分析）
-    if (layout.blocks && layout.blocks.length > 0) {
-      simplified.blocks = layout.blocks.map((block: any) => ({
-        text: block.text,
-        style: block.style
-      }));
-    }
-    
     return simplified;
-  });
-  
-  // 提取完整的医疗信息摘要
-  const medicalInfo = {
-    patientInfo: [] as string[],
-    testResults: [] as string[],
-    medications: [] as string[],
-    recommendations: [] as string[],
-    allText: [] as string[] // 保留所有文本内容
-  };
-  
-  // 分析所有内容，提取医疗信息
-  simplifiedLayouts.forEach((layout: any) => {
-    if (layout.text) {
-      medicalInfo.allText.push(layout.text.trim());
-      
-      const text = layout.text;
-      
-      // 提取患者信息
-      if (text.includes('姓名') || text.includes('性别') || text.includes('年龄') || text.includes('身份证')) {
-        medicalInfo.patientInfo.push(text.trim());
-      }
-      
-      // 提取检查结果
-      if (text.includes('血压') || text.includes('心率') || text.includes('正常') || text.includes('异常')) {
-        medicalInfo.testResults.push(text.trim());
-      }
-      
-      // 提取用药信息
-      if (text.includes('用药') || text.includes('处方') || text.includes('剂量')) {
-        medicalInfo.medications.push(text.trim());
-      }
-      
-      // 提取建议
-      if (text.includes('建议') || text.includes('注意事项') || text.includes('复查')) {
-        medicalInfo.recommendations.push(text.trim());
-      }
-    }
   });
   
   return {
     layouts: simplifiedLayouts,
-    medicalInfo: medicalInfo,
     summary: {
       totalElements: simplifiedLayouts.length,
       titles: simplifiedLayouts.filter((l: any) => l.type === 'title').length,
       texts: simplifiedLayouts.filter((l: any) => l.type === 'text').length,
       tables: simplifiedLayouts.filter((l: any) => l.type === 'table').length,
-      images: simplifiedLayouts.filter((l: any) => l.type === 'figure').length,
-      medicalContent: simplifiedLayouts.filter((l: any) => l.medicalContent).length
+      images: simplifiedLayouts.filter((l: any) => l.type === 'figure').length
     }
   };
 }
