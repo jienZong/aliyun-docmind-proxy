@@ -530,18 +530,28 @@ app.post('/api/parser/result', tokenAuthMiddleware, async (req, res) => {
     
     let data;
     if (getAllPages) {
-      // 如果要求获取所有页面，先查询状态获取页数
+      // 如果要求获取所有页面，持续获取直到没有更多数据
       const statusData = await queryParserStatus(credentials, id);
-      const estimatedPages = statusData.data?.pageCountEstimate || 1;
-      
-      // 获取所有页面的数据
       const allLayouts: any[] = [];
       const pageSize = layoutStepSize || 100; // 每页获取100个元素
+      let pageNum = 0;
+      let hasMoreData = true;
       
-      for (let pageNum = 0; pageNum < Math.ceil(estimatedPages); pageNum++) {
+      // 持续获取数据直到没有更多内容
+      while (hasMoreData) {
         const pageData = await getParserResult(credentials, id, { layoutStepSize: pageSize, layoutNum: pageNum });
-        if (pageData.data?.layouts) {
+        
+        if (pageData.data?.layouts && pageData.data.layouts.length > 0) {
           allLayouts.push(...pageData.data.layouts);
+          pageNum++;
+        } else {
+          hasMoreData = false;
+        }
+        
+        // 防止无限循环，最多获取100页
+        if (pageNum >= 100) {
+          console.warn(`已获取${pageNum}页数据，可能存在数据丢失`);
+          break;
         }
       }
       
@@ -550,7 +560,8 @@ app.post('/api/parser/result', tokenAuthMiddleware, async (req, res) => {
         ...statusData,
         data: {
           ...statusData.data,
-          layouts: allLayouts
+          layouts: allLayouts,
+          totalPages: pageNum // 记录实际获取的页数
         }
       };
     } else {

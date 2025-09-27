@@ -482,9 +482,11 @@ curl -X POST http://localhost:3000/api/parser/status \
 | format | 否 | string | 返回格式：`json`（完整结构）、`simplified`（简化结构）、`markdown`（Markdown文本） | `markdown` |
 
 **重要说明：**
-- 当 `getAllPages=true` 时，系统会自动获取PDF的所有页面内容，确保不会遗漏任何信息
+- 当 `getAllPages=true` 时，系统会自动持续获取PDF的所有页面内容，直到没有更多数据为止
 - 当 `getAllPages=false` 或不设置时，只获取指定页面的内容（通过 `layoutNum` 参数指定）
+- 系统会自动记录实际获取的页数，在响应中返回 `totalPages` 字段
 - 建议对于重要文档使用 `getAllPages=true` 以确保完整性
+- 为防止无限循环，系统最多获取100页数据
 
 #### 响应出参
 
