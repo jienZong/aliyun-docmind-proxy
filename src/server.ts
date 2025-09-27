@@ -559,10 +559,12 @@ app.get('/health', (req, res) => {
 });
 
 const cfg = loadConfig();
-app.listen(cfg.port, () => {
+app.listen(cfg.port, '0.0.0.0', () => {
   console.log(`阿里云文档智能代理服务启动成功！`);
-  console.log(`服务地址: http://localhost:${cfg.port}`);
+  console.log(`服务地址: http://0.0.0.0:${cfg.port}`);
+  console.log(`本地访问: http://localhost:${cfg.port}`);
   console.log(`健康检查: http://localhost:${cfg.port}/health`);
+  console.log(`外部访问: http://39.106.154.223:${cfg.port}/health`);
 });
 
 
