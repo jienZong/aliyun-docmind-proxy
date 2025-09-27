@@ -9,6 +9,17 @@ import { generateAuthToken } from './auth';
 import { ipWhitelistMiddleware, tokenAuthMiddleware } from './middleware';
 import { loadDefaultCredentials } from './openapi/credentials';
 
+// 精简错误日志函数
+function logError(context: string, err: any) {
+  if (err?.aliyun) {
+    // 阿里云错误：只记录关键信息
+    console.error(`${context}: [${err.code}] ${err.message} (RequestId: ${err.requestId})`);
+  } else {
+    // 其他错误：记录简要信息
+    console.error(`${context}: ${err?.message || err?.toString() || 'Unknown error'}`);
+  }
+}
+
 // 提取Markdown内容
 function extractMarkdownFromParserResult(data: any): string {
   if (!data?.data?.layouts) return '';
@@ -153,7 +164,7 @@ app.post('/api/auth/token', async (req, res) => {
       data: authResponse 
     });
   } catch (err: any) {
-    console.error('生成token失败:', err);
+    logError('生成token失败', err);
     res.status(500).json({ 
       error: 'TOKEN_GENERATION_FAILED', 
       message: err?.message || '生成token失败' 
@@ -209,7 +220,7 @@ app.post('/api/auth/sts', async (req, res) => {
       }
     });
   } catch (err: any) {
-    console.error('STS AssumeRole 失败:', err);
+    logError('STS AssumeRole 失败', err);
     res.status(500).json({ error: 'STS_FAILED', message: err?.message || 'AssumeRole 调用失败' });
   }
 });
@@ -257,7 +268,7 @@ app.post('/api/submit/url', tokenAuthMiddleware, async (req, res) => {
     const data = await submitStructureByUrl(credentials, fileUrl, fileName, options);
     res.json({ success: true, data });
   } catch (err: any) {
-    console.error('URL提交任务失败:', err);
+    logError('URL提交任务失败', err);
     if (err?.aliyun) {
       res.status(err.statusCode || 500).json({ success: false, code: err.code, message: err.message, requestId: err.requestId });
     } else {
@@ -313,7 +324,7 @@ app.post('/api/submit/upload', upload.single('file'), tokenAuthMiddleware, async
     
     res.json({ success: true, data });
   } catch (err: any) {
-    console.error('文件上传任务失败:', err);
+    logError('文件上传任务失败', err);
     if (req.file) {
       try { fs.unlinkSync(req.file.path); } catch {}
     }
@@ -352,7 +363,7 @@ app.post('/api/result', tokenAuthMiddleware, async (req, res) => {
     const result = await getStructureResult(credentials, id);
     res.json({ success: true, data: result });
   } catch (err: any) {
-    console.error('查询结果失败:', err);
+    logError('查询结果失败', err);
     if (err?.aliyun) {
       res.status(err.statusCode || 500).json({ success: false, code: err.code, message: err.message, requestId: err.requestId });
     } else {
@@ -409,7 +420,7 @@ app.post('/api/parser/submit/url', tokenAuthMiddleware, async (req, res) => {
     });
     res.json({ success: true, data });
   } catch (err: any) {
-    console.error('Parser URL提交任务失败:', err);
+    logError('Parser URL提交任务失败', err);
     if (err?.aliyun) {
       res.status(err.statusCode || 500).json({ success: false, code: err.code, message: err.message, requestId: err.requestId });
     } else {
@@ -464,7 +475,7 @@ app.post('/api/parser/submit/upload', upload.single('file'), tokenAuthMiddleware
     fs.unlinkSync(file.path);
     res.json({ success: true, data });
   } catch (err: any) {
-    console.error('Parser 文件上传任务失败:', err);
+    logError('Parser 文件上传任务失败', err);
     if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} }
     if (err?.aliyun) {
       res.status(err.statusCode || 500).json({ success: false, code: err.code, message: err.message, requestId: err.requestId });
@@ -492,7 +503,7 @@ app.post('/api/parser/status', tokenAuthMiddleware, async (req, res) => {
     const data = await queryParserStatus(credentials, id);
     res.json({ success: true, data });
   } catch (err: any) {
-    console.error('查询解析状态失败:', err);
+    logError('查询解析状态失败', err);
     if (err?.aliyun) {
       res.status(err.statusCode || 500).json({ success: false, code: err.code, message: err.message, requestId: err.requestId });
     } else {
@@ -544,7 +555,7 @@ app.post('/api/parser/result', tokenAuthMiddleware, async (req, res) => {
       res.json({ success: true, data });
     }
   } catch (err: any) {
-    console.error('获取解析结果失败:', err);
+    logError('获取解析结果失败', err);
     if (err?.aliyun) {
       res.status(err.statusCode || 500).json({ success: false, code: err.code, message: err.message, requestId: err.requestId });
     } else {
@@ -561,10 +572,8 @@ app.get('/health', (req, res) => {
 const cfg = loadConfig();
 app.listen(cfg.port, '0.0.0.0', () => {
   console.log(`阿里云文档智能代理服务启动成功！`);
-  console.log(`服务地址: http://0.0.0.0:${cfg.port}`);
   console.log(`本地访问: http://localhost:${cfg.port}`);
   console.log(`健康检查: http://localhost:${cfg.port}/health`);
-  console.log(`外部访问: http://39.106.154.223:${cfg.port}/health`);
 });
 
 
