@@ -310,7 +310,7 @@ curl -X POST http://localhost:3000/api/parser/submit/url \
     "formulaEnhancement": true,
     "llmEnhancement": true,
     "outputHtmlTable": true,
-    "vlParsePrompt": "请提取报告中的关键医疗信息，包括：患者姓名、诊断结果、检查项目、用药建议、注意事项等"
+    "vlParsePrompt": "请完整解析文档内容，保留所有重要信息"
   }'
 ```
 
@@ -372,7 +372,7 @@ curl -X POST http://localhost:3000/api/parser/submit/upload \
   -F "formulaEnhancement=true" \
   -F "llmEnhancement=true" \
   -F "outputHtmlTable=true" \
-  -F "vlParsePrompt=请提取报告中的关键医疗信息，包括：患者姓名、诊断结果、检查项目、用药建议、注意事项等"
+  -F "vlParsePrompt=请完整解析文档内容，保留所有重要信息"
 ```
 
 #### 响应出参
