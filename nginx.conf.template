@@ -1,0 +1,79 @@
+# 阿里云文档智能代理服务 Nginx 配置模板
+# 使用方法：
+# 1. 在宝塔面板中创建网站
+# 2. 在网站设置中添加反向代理
+# 3. 将以下配置添加到反向代理的高级配置中
+
+# 反向代理配置
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Port $server_port;
+    
+    # 支持大文件上传（根据需求调整）
+    client_max_body_size 50M;
+    
+    # 超时设置
+    proxy_connect_timeout 60s;
+    proxy_send_timeout 60s;
+    proxy_read_timeout 60s;
+    
+    # 支持WebSocket（如果需要）
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    
+    # 缓存控制（可选）
+    # proxy_cache_bypass $http_upgrade;
+}
+
+# 健康检查端点（可选，用于负载均衡器健康检查）
+location /health {
+    proxy_pass http://127.0.0.1:3000/health;
+    proxy_set_header Host $host;
+    access_log off;
+}
+
+# 静态资源缓存（如果有静态文件）
+location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    expires 1y;
+    add_header Cache-Control "public, immutable";
+}
+
+# 安全配置
+# 隐藏Nginx版本
+server_tokens off;
+
+# 防止点击劫持
+add_header X-Frame-Options "SAMEORIGIN" always;
+
+# 防止MIME类型嗅探
+add_header X-Content-Type-Options "nosniff" always;
+
+# XSS保护
+add_header X-XSS-Protection "1; mode=block" always;
+
+# 内容安全策略（根据实际需求调整）
+add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';" always;
+
+# 限制请求大小
+client_max_body_size 50M;
+client_body_buffer_size 128k;
+
+# 限制请求速率（可选）
+# limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+# limit_req zone=api burst=20 nodelay;
+
+# 日志格式
+log_format proxy_format '$remote_addr - $remote_user [$time_local] '
+                        '"$request" $status $body_bytes_sent '
+                        '"$http_referer" "$http_user_agent" '
+                        '$request_time $upstream_response_time';
+
+access_log /www/wwwlogs/docmind_proxy.log proxy_format;

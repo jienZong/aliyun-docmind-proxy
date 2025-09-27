@@ -1,0 +1,35 @@
+{
+  "name": "aliyun-docmind-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "nodemon --watch src --ext ts --exec \"ts-node src/server.ts\"",
+    "cli": "ts-node src/cli.ts",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@alicloud/credentials": "^2.4.4",
+    "@alicloud/docmind-api20220711": "^1.4.11",
+    "@alicloud/sts20150401": "^1.1.6",
+    "@alicloud/tea-util": "^1.4.10",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/multer": "^2.0.0",
+    "axios": "^1.12.2",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.2",
+    "yargs": "^18.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.5.2",
+    "@types/yargs": "^17.0.33",
+    "nodemon": "^3.1.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  }
+}

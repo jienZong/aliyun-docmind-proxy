@@ -1,0 +1,568 @@
+import express from 'express';
+import { loadConfig } from './config';
+import fs from 'fs';
+import path from 'path';
+import multer from 'multer';
+import { submitStructureByStream, submitStructureByUrl, getStructureResult, submitParserByUrl, submitParserByStream, queryParserStatus, getParserResult } from './openapi/docmindClient';
+import { assumeRole } from './openapi/stsClient';
+import { generateAuthToken } from './auth';
+import { ipWhitelistMiddleware, tokenAuthMiddleware } from './middleware';
+import { loadDefaultCredentials } from './openapi/credentials';
+
+// 提取Markdown内容
+function extractMarkdownFromParserResult(data: any): string {
+  if (!data?.data?.layouts) return '';
+  
+  let markdown = '';
+  const layouts = data.data.layouts;
+  
+  for (const layout of layouts) {
+    if (layout.markdownContent) {
+      markdown += layout.markdownContent + '\n\n';
+    } else if (layout.text) {
+      // 如果没有markdownContent，使用纯文本
+      markdown += layout.text + '\n\n';
+    }
+  }
+  
+  return markdown.trim();
+}
+
+// 简化解析结果
+function simplifyParserResult(data: any): any {
+  if (!data?.data?.layouts) return { layouts: [] };
+  
+  const simplifiedLayouts = data.data.layouts.map((layout: any) => {
+    const simplified: any = {
+      type: layout.type,
+      subType: layout.subType,
+      level: layout.level,
+      text: layout.text,
+      pageNum: layout.pageNum
+    };
+    
+    // 如果是表格，提取关键信息
+    if (layout.type === 'table') {
+      simplified.tableInfo = {
+        rows: layout.numRow,
+        cols: layout.numCol,
+        markdownContent: layout.markdownContent,
+        llmResult: layout.llmResult
+      };
+    }
+    
+    // 如果是图片，提取图片信息
+    if (layout.type === 'figure') {
+      simplified.imageInfo = {
+        markdownContent: layout.markdownContent,
+        uniqueId: layout.uniqueId
+      };
+    }
+    
+    return simplified;
+  });
+  
+  return {
+    layouts: simplifiedLayouts,
+    summary: {
+      totalElements: simplifiedLayouts.length,
+      titles: simplifiedLayouts.filter((l: any) => l.type === 'title').length,
+      texts: simplifiedLayouts.filter((l: any) => l.type === 'text').length,
+      tables: simplifiedLayouts.filter((l: any) => l.type === 'table').length,
+      images: simplifiedLayouts.filter((l: any) => l.type === 'figure').length
+    }
+  };
+}
+
+const app = express();
+app.use(express.json({ limit: '20mb' }));
+
+// 统一JSON解析错误返回
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err && err.type === 'entity.parse.failed') {
+    res.status(400).json({ success: false, code: 'INVALID_JSON', message: '请求体不是合法JSON，请检查引号、逗号、花括号是否正确', detail: err.message });
+    return;
+  }
+  if (err instanceof SyntaxError && (err as any).status === 400) {
+    res.status(400).json({ success: false, code: 'INVALID_JSON', message: '请求体不是合法JSON', detail: err.message });
+    return;
+  }
+  next(err);
+});
+
+// 配置multer用于文件上传
+const upload = multer({ dest: 'uploads/' });
+
+// 从环境变量读取IP白名单
+const allowedIPs = (process.env.ALLOWED_IPS || '127.0.0.1,::1').split(',').map(ip => ip.trim());
+
+// 应用IP白名单中间件（除了健康检查）
+app.use((req, res, next) => {
+  if (req.path === '/health') {
+    next();
+  } else {
+    ipWhitelistMiddleware(allowedIPs)(req, res, next);
+  }
+});
+
+// 如果请求未携带我们定义的 Bearer token，则自动回退到阿里云默认凭证链（可通过环境开关禁用）
+app.use((req, _res, next) => {
+  if (!req.headers.authorization && !req.user) {
+    try {
+      const allowDefault = String(process.env.ALLOW_DEFAULT_CREDENTIALS || 'true') === 'true';
+      if (allowDefault) {
+        const cred = loadDefaultCredentials();
+        req.user = {
+          accessKeyId: cred.accessKeyId,
+          accessKeySecret: cred.accessKeySecret,
+          securityToken: cred.securityToken,
+          regionId: process.env.ALIBABA_CLOUD_REGION_ID || 'cn-hangzhou',
+          endpoint: process.env.DOCMIND_ENDPOINT || 'docmind-api.cn-hangzhou.aliyuncs.com',
+        };
+      }
+    } catch {
+      // 若无法从默认链获取凭证，保持为空，让后续中间件报鉴权错误或使用STS流程
+    }
+  }
+  next();
+});
+
+// 鉴权API：获取访问token
+app.post('/api/auth/token', async (req, res) => {
+  try {
+    const { accessKeyId, accessKeySecret, regionId, endpoint } = req.body;
+    
+    if (!accessKeyId || !accessKeySecret) {
+      res.status(400).json({ 
+        error: 'MISSING_CREDENTIALS', 
+        message: 'accessKeyId 和 accessKeySecret 必填' 
+      });
+      return;
+    }
+
+    // 生成token
+    const authResponse = generateAuthToken({
+      accessKeyId,
+      accessKeySecret,
+      regionId,
+      endpoint,
+    });
+
+    res.json({ 
+      success: true, 
+      data: authResponse 
+    });
+  } catch (err: any) {
+    console.error('生成token失败:', err);
+    res.status(500).json({ 
+      error: 'TOKEN_GENERATION_FAILED', 
+      message: err?.message || '生成token失败' 
+    });
+  }
+});
+
+// STS 鉴权：返回阿里云临时凭证（AK/SK/Token）
+app.post('/api/auth/sts', async (req, res) => {
+  try {
+    const { accessKeyId, accessKeySecret, roleArn, roleSessionName, durationSeconds, endpoint, regionId } = req.body || {};
+    if (!accessKeyId || !accessKeySecret || !roleArn || !roleSessionName) {
+      res.status(400).json({
+        error: 'MISSING_PARAMS',
+        message: 'accessKeyId、accessKeySecret、roleArn、roleSessionName 必填'
+      });
+      return;
+    }
+    const creds = await assumeRole({
+      accessKeyId,
+      accessKeySecret,
+      roleArn,
+      roleSessionName,
+      durationSeconds,
+      endpoint,
+      regionId,
+    });
+
+    // 构建完整的凭证对象
+    const fullCredentials = {
+      accessKeyId: creds.AccessKeyId,
+      accessKeySecret: creds.AccessKeySecret,
+      securityToken: creds.SecurityToken,
+      expiration: creds.Expiration,
+      regionId: regionId || 'cn-hangzhou',
+      endpoint: endpoint || 'docmind-api.cn-hangzhou.aliyuncs.com'
+    };
+
+    // 生成base64编码的token供用户保存
+    const token = Buffer.from(JSON.stringify(fullCredentials)).toString('base64');
+    const nowTs = Date.now();
+    const expiresAtIso = creds.Expiration;
+    const expiresAtTs = Number.isFinite(Date.parse(expiresAtIso)) ? Date.parse(expiresAtIso) : undefined;
+
+    res.json({ 
+      success: true, 
+      data: {
+        token, // 用户需要保存这个token，后续API调用时使用
+        credentials: fullCredentials, // 原始凭证信息（可选，用于调试）
+        expiresAt: expiresAtIso,
+        expiresAtTs, // 过期时间（时间戳，毫秒）
+        serverTimeTs: nowTs // 服务器当前时间（时间戳，毫秒）
+      }
+    });
+  } catch (err: any) {
+    console.error('STS AssumeRole 失败:', err);
+    res.status(500).json({ error: 'STS_FAILED', message: err?.message || 'AssumeRole 调用失败' });
+  }
+});
+
+// 通过URL提交文档结构化任务
+app.post('/api/submit/url', tokenAuthMiddleware, async (req, res) => {
+  try {
+    const {
+      fileUrl,
+      fileName,
+      imageStorage,
+      enableSemantic,
+      connectTimeout,
+      readTimeout
+    } = req.body;
+
+    if (!fileUrl || !fileName) {
+      res.status(400).json({
+        error: 'MISSING_PARAMS',
+        message: 'fileUrl 与 fileName 必填'
+      });
+      return;
+    }
+
+    // 使用用户提供的阿里云临时凭证
+    const credentials: any = {
+      accessKeyId: req.user!.accessKeyId,
+      accessKeySecret: req.user!.accessKeySecret,
+      regionId: req.user!.regionId,
+      endpoint: req.user!.endpoint,
+    };
+    
+    // 只有当securityToken存在时才添加
+    if (req.user!.securityToken) {
+      credentials.securityToken = req.user!.securityToken;
+    }
+
+    const options = {
+      ...(imageStorage && { imageStorage }),
+      ...(enableSemantic !== undefined && { enableSemantic }),
+      ...(connectTimeout && { connectTimeout }),
+      ...(readTimeout && { readTimeout }),
+    };
+
+    const data = await submitStructureByUrl(credentials, fileUrl, fileName, options);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    console.error('URL提交任务失败:', err);
+    if (err?.aliyun) {
+      res.status(err.statusCode || 500).json({ success: false, code: err.code, message: err.message, requestId: err.requestId });
+    } else {
+      res.status(500).json({ error: 'SUBMIT_FAILED', message: err?.message || '提交任务失败' });
+    }
+  }
+});
+
+// 通过文件上传提交文档结构化任务
+app.post('/api/submit/upload', upload.single('file'), tokenAuthMiddleware, async (req, res) => {
+  try {
+    const { 
+      fileName, 
+      imageStorage, 
+      enableSemantic, 
+      connectTimeout, 
+      readTimeout 
+    } = req.body;
+    const file = req.file;
+    
+    if (!file) {
+      res.status(400).json({ 
+        error: 'NO_FILE', 
+        message: '请上传文件' 
+      });
+      return;
+    }
+    
+          const credentials: any = {
+            accessKeyId: req.user!.accessKeyId,
+            accessKeySecret: req.user!.accessKeySecret,
+            regionId: req.user!.regionId,
+            endpoint: req.user!.endpoint,
+          };
+          
+          // 只有当securityToken存在时才添加
+          if (req.user!.securityToken) {
+            credentials.securityToken = req.user!.securityToken;
+          }
+    
+    const options = {
+      ...(imageStorage && { imageStorage }),
+      ...(enableSemantic !== undefined && { enableSemantic }),
+      ...(connectTimeout && { connectTimeout }),
+      ...(readTimeout && { readTimeout }),
+    };
+    
+    const stream = fs.createReadStream(file.path);
+    const data = await submitStructureByStream(credentials, stream, fileName || file.originalname, options);
+    
+    // 清理临时文件
+    fs.unlinkSync(file.path);
+    
+    res.json({ success: true, data });
+  } catch (err: any) {
+    console.error('文件上传任务失败:', err);
+    if (req.file) {
+      try { fs.unlinkSync(req.file.path); } catch {}
+    }
+    if (err?.aliyun) {
+      res.status(err.statusCode || 500).json({ success: false, code: err.code, message: err.message, requestId: err.requestId });
+    } else {
+      res.status(500).json({ error: 'SUBMIT_FAILED', message: err?.message || '提交任务失败' });
+    }
+  }
+});
+
+// 查询任务结果
+app.post('/api/result', tokenAuthMiddleware, async (req, res) => {
+  try {
+    const { id } = req.body;
+    if (!id) {
+      res.status(400).json({ 
+        error: 'MISSING_PARAMS', 
+        message: 'id 必填' 
+      });
+      return;
+    }
+    
+          const credentials: any = {
+            accessKeyId: req.user!.accessKeyId,
+            accessKeySecret: req.user!.accessKeySecret,
+            regionId: req.user!.regionId,
+            endpoint: req.user!.endpoint,
+          };
+          
+          // 只有当securityToken存在时才添加
+          if (req.user!.securityToken) {
+            credentials.securityToken = req.user!.securityToken;
+          }
+    
+    const result = await getStructureResult(credentials, id);
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    console.error('查询结果失败:', err);
+    if (err?.aliyun) {
+      res.status(err.statusCode || 500).json({ success: false, code: err.code, message: err.message, requestId: err.requestId });
+    } else {
+      res.status(500).json({ error: 'QUERY_FAILED', message: err?.message || '查询结果失败' });
+    }
+  }
+});
+
+// (已精简) 不提供结构化等待接口，保持纯异步
+
+// ===================== Parser 路由 =====================
+
+// 提交解析（URL）
+app.post('/api/parser/submit/url', tokenAuthMiddleware, async (req, res) => {
+  try {
+    const { 
+      fileUrl, 
+      fileName, 
+      connectTimeout, 
+      readTimeout,
+      formulaEnhancement,
+      llmEnhancement,
+      option,
+      ossBucket,
+      ossEndpoint,
+      pageIndex,
+      outputHtmlTable,
+      multimediaParameters,
+      vlParsePrompt
+    } = req.body;
+    if (!fileUrl || !fileName) {
+      res.status(400).json({ error: 'MISSING_PARAMS', message: 'fileUrl 与 fileName 必填' });
+      return;
+    }
+    const credentials: any = {
+      accessKeyId: req.user!.accessKeyId,
+      accessKeySecret: req.user!.accessKeySecret,
+      regionId: req.user!.regionId,
+      endpoint: req.user!.endpoint,
+    };
+    if (req.user!.securityToken) credentials.securityToken = req.user!.securityToken;
+    const data = await submitParserByUrl(credentials, fileUrl, fileName, { 
+      connectTimeout, 
+      readTimeout,
+      formulaEnhancement,
+      llmEnhancement,
+      option,
+      ossBucket,
+      ossEndpoint,
+      pageIndex,
+      outputHtmlTable,
+      multimediaParameters,
+      vlParsePrompt
+    });
+    res.json({ success: true, data });
+  } catch (err: any) {
+    console.error('Parser URL提交任务失败:', err);
+    if (err?.aliyun) {
+      res.status(err.statusCode || 500).json({ success: false, code: err.code, message: err.message, requestId: err.requestId });
+    } else {
+      res.status(500).json({ error: 'SUBMIT_PARSER_FAILED', message: err?.message || '提交解析任务失败' });
+    }
+  }
+});
+
+// 提交解析（文件上传）
+app.post('/api/parser/submit/upload', upload.single('file'), tokenAuthMiddleware, async (req, res) => {
+  try {
+    const { 
+      fileName, 
+      connectTimeout, 
+      readTimeout,
+      formulaEnhancement,
+      llmEnhancement,
+      option,
+      ossBucket,
+      ossEndpoint,
+      pageIndex,
+      outputHtmlTable,
+      multimediaParameters,
+      vlParsePrompt
+    } = req.body;
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ error: 'NO_FILE', message: '请上传文件' });
+      return;
+    }
+    const credentials: any = {
+      accessKeyId: req.user!.accessKeyId,
+      accessKeySecret: req.user!.accessKeySecret,
+      regionId: req.user!.regionId,
+      endpoint: req.user!.endpoint,
+    };
+    if (req.user!.securityToken) credentials.securityToken = req.user!.securityToken;
+    const stream = fs.createReadStream(file.path);
+    const data = await submitParserByStream(credentials, stream, fileName || file.originalname, { 
+      connectTimeout, 
+      readTimeout,
+      formulaEnhancement,
+      llmEnhancement,
+      option,
+      ossBucket,
+      ossEndpoint,
+      pageIndex,
+      outputHtmlTable,
+      multimediaParameters,
+      vlParsePrompt
+    });
+    fs.unlinkSync(file.path);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    console.error('Parser 文件上传任务失败:', err);
+    if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} }
+    if (err?.aliyun) {
+      res.status(err.statusCode || 500).json({ success: false, code: err.code, message: err.message, requestId: err.requestId });
+    } else {
+      res.status(500).json({ error: 'SUBMIT_PARSER_FAILED', message: err?.message || '提交解析任务失败' });
+    }
+  }
+});
+
+// 查询解析状态
+app.post('/api/parser/status', tokenAuthMiddleware, async (req, res) => {
+  try {
+    const { id } = req.body;
+    if (!id) {
+      res.status(400).json({ error: 'MISSING_PARAMS', message: 'id 必填' });
+      return;
+    }
+    const credentials: any = {
+      accessKeyId: req.user!.accessKeyId,
+      accessKeySecret: req.user!.accessKeySecret,
+      regionId: req.user!.regionId,
+      endpoint: req.user!.endpoint,
+    };
+    if (req.user!.securityToken) credentials.securityToken = req.user!.securityToken;
+    const data = await queryParserStatus(credentials, id);
+    res.json({ success: true, data });
+  } catch (err: any) {
+    console.error('查询解析状态失败:', err);
+    if (err?.aliyun) {
+      res.status(err.statusCode || 500).json({ success: false, code: err.code, message: err.message, requestId: err.requestId });
+    } else {
+      res.status(500).json({ error: 'QUERY_PARSER_STATUS_FAILED', message: err?.message || '查询解析状态失败' });
+    }
+  }
+});
+
+// 获取解析结果
+app.post('/api/parser/result', tokenAuthMiddleware, async (req, res) => {
+  try {
+    const { id, layoutStepSize, layoutNum, format = 'json' } = req.body;
+    if (!id) {
+      res.status(400).json({ error: 'MISSING_PARAMS', message: 'id 必填' });
+      return;
+    }
+    const credentials: any = {
+      accessKeyId: req.user!.accessKeyId,
+      accessKeySecret: req.user!.accessKeySecret,
+      regionId: req.user!.regionId,
+      endpoint: req.user!.endpoint,
+    };
+    if (req.user!.securityToken) credentials.securityToken = req.user!.securityToken;
+    const data = await getParserResult(credentials, id, { layoutStepSize, layoutNum });
+    
+    // 根据format参数返回不同格式的结果
+    if (format === 'markdown') {
+      const markdownContent = extractMarkdownFromParserResult(data);
+      res.json({ 
+        success: true, 
+        data: {
+          format: 'markdown',
+          content: markdownContent,
+          originalData: data // 保留原始数据供调试使用
+        }
+      });
+    } else if (format === 'simplified') {
+      const simplifiedData = simplifyParserResult(data);
+      res.json({ 
+        success: true, 
+        data: {
+          format: 'simplified',
+          content: simplifiedData,
+          originalData: data // 保留原始数据供调试使用
+        }
+      });
+    } else {
+      // 默认返回完整的JSON格式
+      res.json({ success: true, data });
+    }
+  } catch (err: any) {
+    console.error('获取解析结果失败:', err);
+    if (err?.aliyun) {
+      res.status(err.statusCode || 500).json({ success: false, code: err.code, message: err.message, requestId: err.requestId });
+    } else {
+      res.status(500).json({ error: 'GET_PARSER_RESULT_FAILED', message: err?.message || '获取解析结果失败' });
+    }
+  }
+});
+
+// 健康检查
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+const cfg = loadConfig();
+app.listen(cfg.port, () => {
+  console.log(`阿里云文档智能代理服务启动成功！`);
+  console.log(`服务地址: http://localhost:${cfg.port}`);
+  console.log(`健康检查: http://localhost:${cfg.port}/health`);
+});
+
+
