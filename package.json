@@ -22,6 +22,7 @@
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
+    "tencentcloud-sdk-nodejs": "^4.1.124",
     "yargs": "^18.0.0"
   },
   "devDependencies": {

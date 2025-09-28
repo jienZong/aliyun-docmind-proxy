@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { verifyAuthToken, extractTokenFromHeader } from './auth';
+import { TencentCredentials } from './openapi/tencentClient';
 
 // IP白名单中间件
 export function ipWhitelistMiddleware(allowedIPs: string[]) {
@@ -131,6 +132,69 @@ function ipToNumber(ip: string): number {
   return ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
 }
 
+// 腾讯云凭证验证中间件
+export function tencentAuthMiddleware(req: Request, res: Response, next: NextFunction) {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      res.status(401).json({
+        error: 'AUTH_FAILED',
+        message: 'Authorization header is required'
+      });
+      return;
+    }
+
+    const parts = authHeader.split(' ');
+    if (parts.length !== 2 || parts[0] !== 'Bearer') {
+      res.status(401).json({
+        error: 'AUTH_FAILED',
+        message: 'Invalid authorization header format. Expected: Bearer <token>'
+      });
+      return;
+    }
+
+    const token = parts[1];
+    if (!token) {
+      res.status(401).json({
+        error: 'AUTH_FAILED',
+        message: 'Token is missing from authorization header'
+      });
+      return;
+    }
+
+    // 解析腾讯云凭证JSON
+    let credentials: TencentCredentials;
+    try {
+      credentials = JSON.parse(Buffer.from(token, 'base64').toString('utf-8'));
+    } catch (parseError) {
+      res.status(401).json({
+        error: 'AUTH_FAILED',
+        message: 'Invalid token format'
+      });
+      return;
+    }
+
+    // 验证必需字段
+    if (!credentials.secretId || !credentials.secretKey) {
+      res.status(401).json({
+        error: 'AUTH_FAILED',
+        message: 'Missing secretId or secretKey in token'
+      });
+      return;
+    }
+
+    // 将腾讯云凭证添加到请求对象
+    req.tencentUser = credentials;
+
+    next();
+  } catch (error: any) {
+    res.status(401).json({
+      error: 'AUTH_FAILED',
+      message: error.message || '腾讯云认证失败'
+    });
+  }
+}
+
 // 扩展Request类型
 declare global {
   namespace Express {
@@ -142,6 +206,7 @@ declare global {
         regionId?: string | undefined;
         endpoint?: string | undefined;
       };
+      tencentUser?: TencentCredentials;
     }
   }
 }

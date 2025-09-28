@@ -6,8 +6,9 @@ import multer from 'multer';
 import { submitStructureByStream, submitStructureByUrl, getStructureResult, submitParserByUrl, submitParserByStream, queryParserStatus, getParserResult } from './openapi/docmindClient';
 import { assumeRole } from './openapi/stsClient';
 import { generateAuthToken } from './auth';
-import { ipWhitelistMiddleware, tokenAuthMiddleware } from './middleware';
+import { ipWhitelistMiddleware, tokenAuthMiddleware, tencentAuthMiddleware } from './middleware';
 import { loadDefaultCredentials } from './openapi/credentials';
+import { TencentCredentials, createTencentParserTask, getTencentParserResult } from './openapi/tencentClient';
 
 // 精简错误日志函数
 function logError(context: string, err: any) {
@@ -222,6 +223,48 @@ app.post('/api/auth/sts', async (req, res) => {
   } catch (err: any) {
     logError('STS AssumeRole 失败', err);
     res.status(500).json({ error: 'STS_FAILED', message: err?.message || 'AssumeRole 调用失败' });
+  }
+});
+
+// 腾讯云认证：生成腾讯云访问token
+app.post('/api/tencent/auth', async (req, res) => {
+  try {
+    const { secretId, secretKey, region, endpoint } = req.body;
+    
+    if (!secretId || !secretKey) {
+      res.status(400).json({ 
+        error: 'MISSING_CREDENTIALS', 
+        message: 'secretId 和 secretKey 必填' 
+      });
+      return;
+    }
+
+    // 生成腾讯云凭证token
+    const credentials: TencentCredentials = {
+      secretId,
+      secretKey,
+      region: region || 'ap-guangzhou',
+      endpoint: endpoint || 'docai.tencentcloudapi.com'
+    };
+
+    // 生成base64编码的token供用户保存
+    const token = Buffer.from(JSON.stringify(credentials)).toString('base64');
+    const nowTs = Date.now();
+
+    res.json({ 
+      success: true, 
+      data: {
+        token, // 用户需要保存这个token，后续API调用时使用
+        credentials, // 原始凭证信息（可选，用于调试）
+        serverTimeTs: nowTs // 服务器当前时间（时间戳，毫秒）
+      }
+    });
+  } catch (err: any) {
+    logError('生成腾讯云token失败', err);
+    res.status(500).json({ 
+      error: 'TENCENT_TOKEN_GENERATION_FAILED', 
+      message: err?.message || '生成腾讯云token失败' 
+    });
   }
 });
 
@@ -603,6 +646,169 @@ app.post('/api/parser/result', tokenAuthMiddleware, async (req, res) => {
     }
   }
 });
+
+// ==================== 腾讯云文档解析接口 ====================
+
+// 腾讯云文档解析：通过URL提交任务
+app.post('/api/tencent/parser/submit/url', tencentAuthMiddleware, async (req, res) => {
+  try {
+    const {
+      fileUrl,
+      fileName,
+      fileType,
+      fileStartPageNumber,
+      fileEndPageNumber,
+      config
+    } = req.body;
+
+    if (!fileUrl) {
+      res.status(400).json({
+        error: 'MISSING_PARAMS',
+        message: 'fileUrl 必填'
+      });
+      return;
+    }
+
+    // 使用腾讯云凭证
+    const credentials = req.tencentUser!;
+
+    // 创建解析任务
+    const result = await createTencentParserTask(credentials, {
+      fileType: fileType || 'PDF',
+      fileUrl,
+      fileStartPageNumber,
+      fileEndPageNumber,
+      config
+    });
+
+    res.json({
+      success: true,
+      data: {
+        taskId: result.TaskId,
+        fileName: fileName || 'document',
+        fileUrl,
+        fileType: fileType || 'PDF',
+        status: 'processing',
+        requestId: result.RequestId
+      }
+    });
+  } catch (err: any) {
+    logError('腾讯云文档解析任务提交失败', err);
+    res.status(500).json({
+      error: 'TENCENT_PARSER_SUBMIT_FAILED',
+      message: err?.message || '腾讯云文档解析任务提交失败'
+    });
+  }
+});
+
+// 腾讯云文档解析：获取解析结果（包含状态查询）
+app.post('/api/tencent/parser/result', tencentAuthMiddleware, async (req, res) => {
+  try {
+    const { taskId, format } = req.body;
+
+    if (!taskId) {
+      res.status(400).json({
+        error: 'MISSING_PARAMS',
+        message: 'taskId 必填'
+      });
+      return;
+    }
+
+    // 使用腾讯云凭证
+    const credentials = req.tencentUser!;
+
+    // 获取解析结果
+    const result = await getTencentParserResult(credentials, taskId);
+
+    // 根据format参数返回不同格式的结果
+    if (format === 'markdown') {
+      // 提取Markdown内容
+      const markdownContent = extractMarkdownFromTencentResult(result);
+      res.json({
+        success: true,
+        data: {
+          format: 'markdown',
+          content: markdownContent,
+          originalData: result
+        }
+      });
+    } else if (format === 'simplified') {
+      // 简化结果
+      const simplifiedData = simplifyTencentResult(result);
+      res.json({
+        success: true,
+        data: {
+          format: 'simplified',
+          content: simplifiedData,
+          originalData: result
+        }
+      });
+    } else {
+      // 默认返回完整的JSON格式
+      res.json({ success: true, data: result });
+    }
+  } catch (err: any) {
+    logError('获取腾讯云解析结果失败', err);
+    res.status(500).json({
+      error: 'TENCENT_PARSER_RESULT_FAILED',
+      message: err?.message || '获取腾讯云解析结果失败'
+    });
+  }
+});
+
+// 提取腾讯云结果的Markdown内容
+function extractMarkdownFromTencentResult(data: any): string {
+  if (!data) return '';
+  
+  let markdown = '';
+  
+  // 根据腾讯云官方文档，结果是一个ZIP文件的下载链接
+  // 这里返回下载链接信息，实际内容需要下载ZIP文件后解析
+  if (data.DocumentRecognizeResultUrl) {
+    markdown += `# 文档解析结果\n\n`;
+    markdown += `**状态**: ${data.Status}\n\n`;
+    markdown += `**下载链接**: ${data.DocumentRecognizeResultUrl}\n\n`;
+    markdown += `**说明**: 解析结果已打包为ZIP文件，请下载后解压查看Markdown内容。\n\n`;
+    
+    if (data.Usage) {
+      markdown += `**使用量信息**:\n`;
+      markdown += `- 页数: ${data.Usage.PageNumber || 0}\n`;
+      markdown += `- Token数: ${data.Usage.TotalTokens || 0}\n\n`;
+    }
+    
+    if (data.FailedPages && data.FailedPages.length > 0) {
+      markdown += `**失败页面**: ${data.FailedPages.map((page: any) => page.PageNumber).join(', ')}\n\n`;
+    }
+    
+    if (data.Error) {
+      markdown += `**错误信息**: ${data.Error.Message}\n\n`;
+    }
+  }
+  
+  return markdown.trim();
+}
+
+// 简化腾讯云结果
+function simplifyTencentResult(data: any): any {
+  if (!data) return {};
+  
+  return {
+    status: data.Status || 'Unknown',
+    downloadUrl: data.DocumentRecognizeResultUrl || '',
+    failedPages: data.FailedPages || [],
+    usage: data.Usage || {},
+    error: data.Error || null,
+    requestId: data.RequestId || '',
+    summary: {
+      status: data.Status || 'Unknown',
+      hasDownloadUrl: !!data.DocumentRecognizeResultUrl,
+      failedPageCount: data.FailedPages ? data.FailedPages.length : 0,
+      pageNumber: data.Usage ? data.Usage.PageNumber : 0,
+      totalTokens: data.Usage ? data.Usage.TotalTokens : 0,
+      hasError: !!data.Error
+    }
+  };
+}
 
 // 健康检查
 app.get('/health', (req, res) => {

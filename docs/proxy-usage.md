@@ -637,3 +637,169 @@ curl -X POST http://localhost:3000/api/parser/result \
 
 - 请求体可传：connectTimeout/readTimeout（毫秒）。
 - 全局默认：环境变量 `DEFAULT_CONNECT_TIMEOUT`、`DEFAULT_READ_TIMEOUT`。
+
+---
+
+# 腾讯云文档解析服务
+
+## 1. 腾讯云认证
+
+### 1.1 获取访问Token
+
+#### 接口信息
+- **接口**：`POST /api/tencent/auth`
+- **功能**：生成腾讯云访问token
+
+#### 请求入参
+
+| 参数名 | 必填 | 类型 | 说明 | 示例值 |
+|--------|------|------|------|--------|
+| secretId | 是 | string | 腾讯云SecretId | `AKIDxxxxx` |
+| secretKey | 是 | string | 腾讯云SecretKey | `xxxxx` |
+| region | 否 | string | 地域 | `ap-guangzhou` |
+| endpoint | 否 | string | 服务端点 | `docai.tencentcloudapi.com` |
+
+#### 响应出参
+
+| 参数名 | 类型 | 说明 |
+|--------|------|------|
+| success | boolean | 是否成功 |
+| data.token | string | 访问token（需要保存，后续API调用使用） |
+| data.credentials | object | 原始凭证信息 |
+| data.serverTimeTs | number | 服务器当前时间（时间戳，毫秒） |
+
+#### 请求示例
+
+```bash
+curl -X POST http://localhost:3000/api/tencent/auth \
+  -H "Content-Type: application/json" \
+  -d '{
+    "secretId": "AKIDxxxxx",
+    "secretKey": "xxxxx",
+    "region": "ap-guangzhou"
+  }'
+```
+
+## 2. 腾讯云文档解析
+
+### 2.1 提交解析任务
+
+#### 接口信息
+- **接口**：`POST /api/tencent/parser/submit/url`
+- **功能**：通过URL提交文档解析任务
+
+#### 请求入参
+
+| 参数名 | 必填 | 类型 | 说明 | 示例值 |
+|--------|------|------|------|--------|
+| fileUrl | 是 | string | 文档URL | `https://example.com/doc.pdf` |
+| fileName | 否 | string | 文件名 | `报告.pdf` |
+| fileType | 否 | string | 文件类型（支持PDF、DOC、DOCX、XLS、XLSX、PPT、PPTX、MD、TXT、PNG、JPG、JPEG、CSV、HTML、EPUB等） | `PDF` |
+| fileStartPageNumber | 否 | number | 起始页码 | `1` |
+| fileEndPageNumber | 否 | number | 结束页码 | `100` |
+| config | 否 | object | 解析配置 | `{}` |
+
+#### 响应出参
+
+| 参数名 | 类型 | 说明 |
+|--------|------|------|
+| success | boolean | 是否成功 |
+| data.taskId | string | 任务ID |
+| data.fileName | string | 文件名 |
+| data.fileUrl | string | 文件URL |
+| data.fileType | string | 文件类型 |
+| data.status | string | 任务状态 |
+| data.requestId | string | 请求ID |
+
+#### 请求示例
+
+```bash
+curl -X POST http://localhost:3000/api/tencent/parser/submit/url \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fileUrl": "https://example.com/doc.pdf",
+    "fileName": "报告.pdf",
+    "fileType": "PDF",
+    "fileStartPageNumber": 1,
+    "fileEndPageNumber": 10
+  }'
+```
+
+### 2.2 获取解析结果
+
+#### 接口信息
+- **接口**：`POST /api/tencent/parser/result`
+- **功能**：获取文档解析结果（包含状态查询）
+
+#### 请求入参
+
+| 参数名 | 必填 | 类型 | 说明 | 示例值 |
+|--------|------|------|------|--------|
+| taskId | 是 | string | 任务ID | `task-123` |
+| format | 否 | string | 返回格式：`json`（完整结构）、`simplified`（简化结构）、`markdown`（Markdown文本） | `markdown` |
+
+#### 响应出参
+
+根据 `format` 参数返回不同格式的结果：
+
+**format=markdown**
+| 参数名 | 类型 | 说明 |
+|--------|------|------|
+| success | boolean | 是否成功 |
+| data.format | string | 格式类型 |
+| data.content | string | Markdown文本内容 |
+| data.originalData | object | 原始数据 |
+
+**format=simplified**
+| 参数名 | 类型 | 说明 |
+|--------|------|------|
+| success | boolean | 是否成功 |
+| data.format | string | 格式类型 |
+| data.content | object | 简化的结构化数据 |
+| data.originalData | object | 原始数据 |
+
+**format=json（默认）**
+| 参数名 | 类型 | 说明 |
+|--------|------|------|
+| success | boolean | 是否成功 |
+| data | object | 腾讯云API返回的完整结果 |
+
+#### 请求示例
+
+```bash
+# 获取Markdown格式结果
+curl -X POST http://localhost:3000/api/tencent/parser/result \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "taskId": "task-123",
+    "format": "markdown"
+  }'
+```
+
+## 3. 腾讯云与阿里云对比
+
+| 功能 | 阿里云DocMind | 腾讯云DocAI |
+|------|---------------|-------------|
+| 认证方式 | AK/SK + STS临时凭证 | SecretId/SecretKey |
+| 文档类型 | PDF、DOC、DOCX、图片等 | PDF、DOC、DOCX、XLS、XLSX、PPT、PPTX、MD、TXT、CSV、HTML、EPUB等 |
+| 解析能力 | 结构化解析、大模型增强 | 文档重构、Markdown转换 |
+| 结果格式 | 支持Markdown、简化JSON | 支持Markdown、简化JSON |
+| 文件上传 | 支持URL和直接上传 | 支持URL和Base64 |
+| 页数处理 | 支持获取所有页面 | 支持指定页码范围 |
+| 结果获取 | 直接返回解析内容 | 返回ZIP文件下载链接 |
+
+## 4. 使用建议
+
+1. **选择服务商**：
+   - 阿里云DocMind：功能更全面，支持大模型增强
+   - 腾讯云DocAI：接口相对简单，适合基础文档解析
+
+2. **认证管理**：
+   - 阿里云：建议使用STS临时凭证，更安全
+   - 腾讯云：直接使用SecretId/SecretKey
+
+3. **结果处理**：
+   - 两种服务都支持Markdown格式输出
+   - 可根据需要选择简化JSON或完整JSON格式
